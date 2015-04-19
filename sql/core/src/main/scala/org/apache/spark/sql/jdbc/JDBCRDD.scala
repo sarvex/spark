@@ -18,6 +18,7 @@
 package org.apache.spark.sql.jdbc
 
 import java.sql.{Connection, DriverManager, ResultSet, ResultSetMetaData, SQLException}
+import java.util.Properties
 
 import org.apache.commons.lang.StringEscapeUtils.escapeSql
 import org.apache.spark.{Logging, Partition, SparkContext, TaskContext}
@@ -90,9 +91,9 @@ private[sql] object JDBCRDD extends Logging {
    * @throws SQLException if the table specification is garbage.
    * @throws SQLException if the table contains an unsupported type.
    */
-  def resolveTable(url: String, table: String): StructType = {
+  def resolveTable(url: String, table: String, properties: Properties): StructType = {
     val quirks = DriverQuirks.get(url)
-    val conn: Connection = DriverManager.getConnection(url)
+    val conn: Connection = DriverManager.getConnection(url, properties)
     try {
       val rs = conn.prepareStatement(s"SELECT * FROM $table WHERE 1=0").executeQuery()
       try {
@@ -147,7 +148,7 @@ private[sql] object JDBCRDD extends Logging {
    *
    * @return A function that loads the driver and connects to the url.
    */
-  def getConnector(driver: String, url: String): () => Connection = {
+  def getConnector(driver: String, url: String, properties: Properties): () => Connection = {
     () => {
       try {
         if (driver != null) Class.forName(driver)
@@ -156,7 +157,7 @@ private[sql] object JDBCRDD extends Logging {
           logWarning(s"Couldn't find class $driver", e);
         }
       }
-      DriverManager.getConnection(url)
+      DriverManager.getConnection(url, properties)
     }
   }
   /**
@@ -179,6 +180,7 @@ private[sql] object JDBCRDD extends Logging {
       schema: StructType,
       driver: String,
       url: String,
+      properties: Properties,
       fqTable: String,
       requiredColumns: Array[String],
       filters: Array[Filter],
@@ -189,7 +191,7 @@ private[sql] object JDBCRDD extends Logging {
     return new
         JDBCRDD(
           sc,
-          getConnector(driver, url),
+          getConnector(driver, url, properties),
           prunedSchema,
           fqTable,
           requiredColumns,
@@ -231,7 +233,7 @@ private[sql] class JDBCRDD(
    * Converts value to SQL expression.
    */
   private def compileValue(value: Any): Any = value match {
-    case stringValue: String => s"'${escapeSql(stringValue)}'"
+    case stringValue: UTF8String => s"'${escapeSql(stringValue.toString)}'"
     case _ => value
   }
 
@@ -347,12 +349,14 @@ private[sql] class JDBCRDD(
           val pos = i + 1
           conversions(i) match {
             case BooleanConversion    => mutableRow.setBoolean(i, rs.getBoolean(pos))
+            // TODO(davies): convert Date into Int
             case DateConversion       => mutableRow.update(i, rs.getDate(pos))
             case DecimalConversion    => mutableRow.update(i, rs.getBigDecimal(pos))
             case DoubleConversion     => mutableRow.setDouble(i, rs.getDouble(pos))
             case FloatConversion      => mutableRow.setFloat(i, rs.getFloat(pos))
             case IntegerConversion    => mutableRow.setInt(i, rs.getInt(pos))
             case LongConversion       => mutableRow.setLong(i, rs.getLong(pos))
+            // TODO(davies): use getBytes for better performance, if the encoding is UTF-8
             case StringConversion     => mutableRow.setString(i, rs.getString(pos))
             case TimestampConversion  => mutableRow.update(i, rs.getTimestamp(pos))
             case BinaryConversion     => mutableRow.update(i, rs.getBytes(pos))
@@ -361,7 +365,7 @@ private[sql] class JDBCRDD(
               var ans = 0L
               var j = 0
               while (j < bytes.size) {
-                ans = 256*ans + (255 & bytes(j))
+                ans = 256 * ans + (255 & bytes(j))
                 j = j + 1;
               }
               mutableRow.setLong(i, ans)
